@@ -1,39 +1,94 @@
+// @ts-check
+
 /**
- *
- * @param {import('estree').Expression} node
- * @returns  {node is import('estree').CallExpression}
+ * @param {import('estree').Expression | import('estree').Super | null | undefined} tag
+ * @returns  {tag is import('estree').CallExpression}
  */
-const isStyledCallExpression = (tag) => tag?.type === 'CallExpression';
-const isStyledFunc = (node) => node.tag.callee?.name === 'styled';
-const isStyledFuncComponentArgument = (node) => isStyledFunc(node) && node.tag.arguments?.[0]?.type === 'Identifier';
-const isStyledFuncStringArgument = (node) => isStyledFunc(node) && node.tag.arguments?.[0]?.type === 'Literal';
+const isCallExpression = (tag) => tag?.type === 'CallExpression';
+/**
+ * @param {import('estree').Node} node
+ * @returns  {node is import('estree').ReturnStatement}
+ */
+const isReturnStatement = (node) => node.type === 'ReturnStatement';
+/**
+ * @param {import('estree').Expression} tag
+ * @returns {tag is import('estree').CallExpression}
+ */
+const isStyledFunc = (tag) => isCallExpression(tag) && isIdentifier(tag.callee) && tag.callee?.name === 'styled';
+/**
+ * @param {import('estree').TaggedTemplateExpression} node
+ */
+const getStyledFuncComponentArgument = (node) =>
+  isStyledFunc(node.tag) && node.tag.arguments?.[0]?.type === 'Identifier' ? node.tag.arguments[0] : null;
+/**
+ * @param {import('estree').TaggedTemplateExpression} node
+ */
+const getStyledFuncStringArgument = (node) =>
+  isStyledFunc(node.tag) && node.tag.arguments?.[0]?.type === 'Literal' ? node.tag.arguments[0] : null;
+/**
+ * @param {import('estree').Expression} tag
+ */
+const getStyledFuncWithAttrs = (tag) =>
+  isCallExpression(tag) &&
+  tag.callee.type === 'MemberExpression' &&
+  isCallExpression(tag.callee.object) &&
+  isStyledIdentifier(tag.callee.object.callee) &&
+  isAttrs(tag)
+    ? tag.callee
+    : null;
 
-const isStyledFuncWithAttrs = (node) => node.tag.callee?.object?.callee?.name === 'styled' && isAttrs(node);
-const isStyledStringArgumentFuncWithAttrs = (node) =>
-  isStyledFuncWithAttrs(node) && node.tag.callee?.object?.arguments?.[0]?.type === 'Literal';
-const isStyledComponentArgumentFuncWithAttrs = (node) =>
-  isStyledFuncWithAttrs(node) && node.tag.callee?.object?.arguments?.[0]?.type === 'Identifier';
+/**
+ * @param {import('estree').TaggedTemplateExpression} node
+ */
+const getStyledStringArgumentFuncWithAttrs = (node) => {
+  const callee = getStyledFuncWithAttrs(node.tag);
 
-const styledCallElementObjectMapArgumentTag = (node) => node.tag?.arguments?.[0]?.property?.name;
+  return isCallExpression(callee?.object) && callee.object.arguments[0]?.type === 'Literal'
+    ? callee?.object?.arguments[0]
+    : null;
+};
+
+/**
+ * @param {import('estree').TaggedTemplateExpression} node
+ */
+const getStyledComponentArgumentFuncWithAttrs = (node) => {
+  const callee = getStyledFuncWithAttrs(node.tag);
+
+  return isCallExpression(callee?.object) && isIdentifier(callee.object.arguments[0])
+    ? callee.object.arguments[0]
+    : null;
+};
+/**
+ * @param {import('estree').TaggedTemplateExpression} node
+ */
+const getStyledCallElementObjectMapArgumentTag = (node) =>
+  isCallExpression(node.tag) &&
+  node.tag.arguments?.[0]?.type === 'MemberExpression' &&
+  isIdentifier(node.tag.arguments?.[0]?.property) &&
+  node.tag.arguments?.[0]?.property?.name
+    ? node.tag.arguments[0].property.name
+    : null;
 /**
  *
- * @param {import('eslint').Rule.Node | null | undefined} node
+ * @param {import('estree').Node | null | undefined} node
  * @returns  {node is import('estree').Identifier}
  */
 const isIdentifier = (node) => node?.type === 'Identifier';
 /**
  *
- * @param {import('eslint').Rule.Node | null | undefined} node
+ * @param {import('estree').Node | null | undefined} node
  * @returns  {node is import('estree').Identifier}
  */
 const isStyledIdentifier = (node) => isIdentifier(node) && node.name === 'styled';
 /**
  *
- * @param {import('estree').TaggedTemplateExpression | null | undefined} node
- * @returns  {boolean}
+ * @param {import('estree').Expression} tag
  */
-const isPlainSTE = (node) => node.tag.type === 'MemberExpression' && isStyledIdentifier(node.tag?.object);
-const isAttrs = ({ tag }) => tag.callee?.property?.name === 'attrs';
+const isAttrs = (tag) =>
+  isCallExpression(tag) &&
+  'property' in tag.callee &&
+  isIdentifier(tag.callee.property) &&
+  tag.callee.property.name === 'attrs';
 
 const getAttrsType = (node) => {
   const type = node.tag?.arguments?.[0]?.type;
@@ -67,7 +122,9 @@ module.exports = (styledComponentsDict, context, name) => {
       try {
         // TODO: Consider supporting more complex parent name definitions (e.g. object keys)
         let styledComponentName =
-          node.parent && 'id' in node.parent && node.parent.id?.type === 'Identifier' ? node.parent.id.name : null;
+          node.parent && node.parent.type === 'VariableDeclarator' && isIdentifier(node.parent.id)
+            ? node.parent.id.name
+            : null;
         if (!styledComponentName) {
           // const Components = { Component: styled.div({ ... }) }
           if (
@@ -112,7 +169,7 @@ module.exports = (styledComponentsDict, context, name) => {
 
           // styled('div')(...)
           if (arg.type === 'Literal') {
-            tag = arg.value;
+            tag = String(arg.value);
 
             if (!tag) return;
 
@@ -159,9 +216,14 @@ module.exports = (styledComponentsDict, context, name) => {
       }
     },
     TaggedTemplateExpression(node) {
-      const func = (inspectee) =>
-        name.includes('html-has-lang') && context.report(node, `made it here: ${inspect(inspectee || node)}`);
-      let scName = node.parent.id && node.parent.id.name;
+      // const func = (inspectee) =>
+      //   name.includes('html-has-lang') && context.report({node,message: `made it here: ${inspect(inspectee || node)}`});
+
+      let scName =
+        node.parent.type === 'VariableDeclarator' &&
+        node.parent.id &&
+        isIdentifier(node.parent.id) &&
+        node.parent.id.name;
 
       if (!scName) {
         // const Components = { Component: styled.div`` }
@@ -185,21 +247,22 @@ module.exports = (styledComponentsDict, context, name) => {
       let tag = '';
 
       // styled(Component)`` || styled.div.attrs(...)`` || styled('div')``
-      if (isStyledCallExpression(node.tag)) {
+      if (isCallExpression(node.tag)) {
         // styled(animated.div)``
-        if (styledCallElementObjectMapArgumentTag(node)) {
-          tag = styledCallElementObjectMapArgumentTag(node);
-        }
+        tag = getStyledCallElementObjectMapArgumentTag(node) || '';
+
         // styled('div')``;
-        else if (isStyledFuncStringArgument(node)) {
-          tag = node.tag.arguments?.[0]?.value || '';
+        if (!tag) {
+          const stringArg = getStyledFuncStringArgument(node);
+          if (stringArg?.value) {
+            tag = String(stringArg.value);
+          }
         }
 
         // styled(Component)`` || styled(Component).attrs(...)``
-        if (isStyledFuncComponentArgument(node) || isStyledComponentArgumentFuncWithAttrs(node)) {
-          const ancestorScName = isStyledFuncComponentArgument(node)
-            ? node.tag.arguments[0].name
-            : node.tag.callee.object.arguments[0].name;
+        const componentArg = getStyledFuncComponentArgument(node) || getStyledComponentArgumentFuncWithAttrs(node);
+        if (componentArg) {
+          const ancestorScName = componentArg.name;
 
           // styled(StyledComponent)`` || styled(StyledComponent).attrs(...)``
           if (styledComponentsDict[ancestorScName]) {
@@ -213,31 +276,44 @@ module.exports = (styledComponentsDict, context, name) => {
           }
         }
 
-        // styled.div.attrs(...)`` || styled(Component).attrs(...)`` || styled('div').attrs(...)``
-        if (isAttrs(node) || isStyledFuncWithAttrs(node)) {
-          let attrsPropertiesArr = [];
+        // styled.div.attrs(...)`` || styled('div').attrs(...)``
+        if (isAttrs(node.tag) || getStyledFuncWithAttrs(node.tag)) {
+          const arg = getStyledStringArgumentFuncWithAttrs(node);
+          if (arg) {
+            // styled('div').attrs(...)``
+            tag = String(arg.value);
+          } else if (
+            node.tag.callee.type === 'MemberExpression' &&
+            node.tag.callee.object.type === 'MemberExpression' &&
+            isIdentifier(node.tag.callee.object.property)
+          ) {
+            // styled.div.attrs(...)``
+            tag = node.tag.callee.object.property.name;
+          }
+
+          if (!tag) return;
+
           const attrsNode = node.tag.arguments[0];
 
-          if (isStyledStringArgumentFuncWithAttrs(node)) {
-            tag = node.tag.callee?.object?.arguments?.[0]?.value;
-          } else if (!isStyledComponentArgumentFuncWithAttrs(node)) {
-            tag = node.tag.callee.object.property?.name;
-          }
-          const attrsType = getAttrsType(node);
-          if (!tag || !attrsType) return;
+          if (!attrsNode) return;
+
           // styled.div.attrs(function() { return {} })``
 
+          let attrsPropertiesArr = [];
           // TODO all these empty array defaults are a temp fix. Should get a better way of actually trying to see what
           //  is returned from function attrs in the case they aren't just simple immediate returns, e.g., if else statements
-          if (attrsType === 'arrow') {
-            attrsPropertiesArr = attrsNode?.body?.properties || [];
+          if (attrsNode.type == 'ArrowFunctionExpression' && attrsNode.body?.type === 'ObjectExpression') {
+            attrsPropertiesArr = attrsNode.body.properties;
             // styled.div.attrs(() => ({}))``
-          } else if (attrsType === 'func') {
-            attrsPropertiesArr =
-              attrsNode?.body?.body?.find((x) => x.type === 'ReturnStatement')?.argument?.properties || [];
+          } else if (attrsNode.type == 'FunctionExpression') {
+            const returnStatement = attrsNode.body?.body?.find(isReturnStatement);
+
+            if (returnStatement?.argument?.type === 'ObjectExpression') {
+              attrsPropertiesArr = returnStatement.argument.properties;
+            }
             // styled.div.attrs({})``
-          } else if (attrsType === 'object') {
-            attrsPropertiesArr = attrsNode?.properties || [];
+          } else if (attrsNode.type === 'ObjectExpression') {
+            attrsPropertiesArr = attrsNode.properties;
           }
 
           const arithmeticUnaryOperators = ['+', '-'];
